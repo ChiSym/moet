@@ -6,4 +6,6 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "genjax>=0.10.3",
+    "jax>=0.5.3",
+    "jaxtyping>=0.2.38",
 ]
