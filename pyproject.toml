@@ -5,7 +5,14 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "beartype>=0.20.2",
+    "black>=25.1.0",
     "genjax>=0.10.3",
-    "jax>=0.5.3",
+    "ipdb>=0.13.13",
+    "ipykernel>=6.29.5",
+    "jax[cuda12]>=0.5.3",
     "jaxtyping>=0.2.38",
+    "optax>=0.2.4",
+    "polars>=1.26.0",
+    "pytest>=8.3.5",
 ]
