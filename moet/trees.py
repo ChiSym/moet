@@ -1,11 +1,9 @@
-from genjax import adev
 import jax
 from jaxtyping import Array
 import jax.numpy as jnp
 from jaxtyping import Int, Float
-from functools import partial
-from moet.utils import cat_reinforce, categorical2d
-from genjax import gen, categorical
+from moet.utils import categorical2d
+from genjax import gen
 
 
 @gen

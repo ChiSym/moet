@@ -1,4 +1,3 @@
-from genjax.adev import reinforce
 from tensorflow_probability.substrates import jax as tfp
 from jaxtyping import Float, Array, Bool, Integer
 import jax.numpy as jnp
@@ -6,16 +5,6 @@ import jax
 from genjax import exact_density
 
 tfd = tfp.distributions
-
-
-def cat_logpdf(v, logits):
-    return tfd.Categorical(logits=logits).log_prob(v)
-
-
-cat_reinforce = reinforce(
-    lambda key, logits: tfd.Categorical(logits=logits).sample(seed=key),
-    cat_logpdf,
-)
 
 
 def mi(
@@ -47,3 +36,11 @@ def categorical2d_logpdf(v: Integer[Array, "2"], logits: Float[Array, "n n"]):
 categorical2d = exact_density(
     categorical2d_sample, categorical2d_logpdf, "categorical2d"
 )
+
+
+def to_tuple(x):
+    try:
+        len(x)
+        return tuple(to_tuple(element) for element in x)
+    except TypeError:
+        return int(x)
