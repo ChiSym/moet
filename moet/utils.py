@@ -3,6 +3,8 @@ from jaxtyping import Float, Array, Bool, Integer
 import jax.numpy as jnp
 import jax
 from genjax import exact_density
+import numpy as np
+
 
 tfd = tfp.distributions
 
@@ -44,3 +46,17 @@ def to_tuple(x):
         return tuple(to_tuple(element) for element in x)
     except TypeError:
         return int(x)
+
+
+def get_mi_theta(train_data, n_mi_samples=10000, eps=1e-10):
+    jitted_mi = jax.jit(jax.vmap(jax.vmap(mi, in_axes=(1, None)), in_axes=(None, 1)))
+    bool_data = train_data == 0
+    mi_estimates = jitted_mi(
+        bool_data[:n_mi_samples, :].astype(float),
+        bool_data[:n_mi_samples, :].astype(float),
+    )
+    theta = jnp.maximum(mi_estimates, eps)
+    theta = jnp.where(jnp.eye(len(mi_estimates)), 0, theta)
+    theta /= jnp.sum(theta)
+    theta = np.array(theta)
+    return theta

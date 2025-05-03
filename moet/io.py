@@ -1,5 +1,7 @@
 import polars as pl
 import numpy as np
+import jax.numpy as jnp
+from jaxtyping import Float, Array
 
 
 def discretize_dataframe(df: pl.DataFrame, n_bins: int = 20):
@@ -92,3 +94,20 @@ def from_dummies(df, separator="_"):
         )
         for name, exprs in col_exprs.items()
     )
+
+
+def load_data(dataset_path):
+    train_df, test_df = load_huggingface(dataset_path)
+    df = pl.concat((train_df, test_df), how="vertical")
+    schema, discretized_df, categorical_idxs = discretize_dataframe(df)
+    dummies_df = to_dummies(discretized_df)
+    bool_data, col_names = dummies_to_padded_array(dummies_df, categorical_idxs)
+
+    bool_data = np.where(np.any(bool_data, axis=-1)[..., None], bool_data, True)
+    data: Float[Array, "batch_size n_inputs input_dim"] = jnp.where(
+        bool_data, 0, -jnp.inf
+    )
+
+    train_data = np.array(data[: len(train_df)])
+    test_data = np.array(data[len(train_df) :])
+    return train_data, test_data, col_names

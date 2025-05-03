@@ -69,3 +69,21 @@ def loss_fn(
     out = jax.vmap(circuit, in_axes=(0, None, None, None))(X_pad, Qs, W, layers)
     log_Z = out[-1]
     return -(jnp.sum(out[:-1]) - n_batch * log_Z) / n_batch
+
+
+def make_circuit_parameters(key, depth, n_clusters, n_categories, max_categories):
+    Qs = []
+    n_inputs = n_categories
+    current_dim = max_categories
+    for i in range(depth):
+        key, subkey = jax.random.split(key)
+        Q = jax.random.normal(subkey, (n_inputs, n_clusters[i], current_dim))
+        Qs.append(Q)
+        n_outputs = n_inputs // 2
+        n_inputs -= n_outputs
+        current_dim = n_clusters[i]
+
+    key, subkey = jax.random.split(key)
+    final_layer = jnp.arange(n_inputs + n_outputs)[None, :]
+    W = jax.random.normal(subkey, (current_dim,))
+    return Qs, W, final_layer
