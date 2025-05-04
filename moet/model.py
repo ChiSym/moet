@@ -1,4 +1,4 @@
-from jaxtyping import Float, Array, Integer, jaxtyped, PyTree
+from jaxtyping import Float, Array, Integer, jaxtyped, PyTree, PyTreeDef
 import jax.numpy as jnp
 import jax
 from beartype import beartype as typechecker
@@ -56,19 +56,31 @@ def circuit(
     return jax.nn.logsumexp(X)
 
 
-@jax.jit
-def loss_fn(
+@partial(jax.jit, static_argnames=("layers_treedef"))
+def loss_fn_per_example(
     X: Float[Array, "batch_size n_inputs input_dim"],
     Qs: PyTree[Float[Array, "?n_inputs ?output_dim ?input_dim"], "T"],
     W: Float[Array, "n_outputs"],
-    layers: PyTree[int],
-) -> Float[Array, ""]:
-    n_batch = X.shape[0]
+    layers_flat: Integer[Array, "flat_layers"],
+    layers_treedef: PyTreeDef,
+) -> Float[Array, "batch_size"]:
+    layers = jax.tree.unflatten(layers_treedef, layers_flat)
     pad = jnp.zeros_like(X[0:1])
     X_pad = jnp.concatenate([X, pad], axis=0)
     out = jax.vmap(circuit, in_axes=(0, None, None, None))(X_pad, Qs, W, layers)
     log_Z = out[-1]
-    return -(jnp.sum(out[:-1]) - n_batch * log_Z) / n_batch
+    return -(out[:-1] - log_Z)
+
+
+@partial(jax.jit, static_argnames=("layers_treedef"))
+def loss_fn(
+    X: Float[Array, "batch_size n_inputs input_dim"],
+    Qs: PyTree[Float[Array, "?n_inputs ?output_dim ?input_dim"], "T"],
+    W: Float[Array, "n_outputs"],
+    layers_flat: Integer[Array, "flat_layers"],
+    layers_treedef: PyTreeDef,
+) -> Float[Array, ""]:
+    return jnp.mean(loss_fn_per_example(X, Qs, W, layers_flat, layers_treedef))
 
 
 def make_circuit_parameters(key, depth, n_clusters, n_categories, max_categories):

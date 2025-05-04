@@ -1,12 +1,13 @@
-from tensorflow_probability.substrates import jax as tfp
+# from tensorflow_probability.substrates import jax as tfp
 from jaxtyping import Float, Array, Bool, Integer
 import jax.numpy as jnp
 import jax
-from genjax import exact_density
+
+# from genjax import exact_density
 import numpy as np
 
 
-tfd = tfp.distributions
+# tfd = tfp.distributions
 
 
 def mi(
@@ -35,9 +36,9 @@ def categorical2d_logpdf(v: Integer[Array, "2"], logits: Float[Array, "n n"]):
     return logits.at[v[0], v[1]].get()
 
 
-categorical2d = exact_density(
-    categorical2d_sample, categorical2d_logpdf, "categorical2d"
-)
+# categorical2d = exact_density(
+#     categorical2d_sample, categorical2d_logpdf, "categorical2d"
+# )
 
 
 def to_tuple(x):
@@ -45,7 +46,7 @@ def to_tuple(x):
         len(x)
         return tuple(to_tuple(element) for element in x)
     except TypeError:
-        return int(x)
+        return x
 
 
 def get_mi_theta(train_data, n_mi_samples=10000, eps=1e-10):
@@ -59,4 +60,4 @@ def get_mi_theta(train_data, n_mi_samples=10000, eps=1e-10):
     theta = jnp.where(jnp.eye(len(mi_estimates)), 0, theta)
     theta /= jnp.sum(theta)
     theta = np.array(theta)
-    return theta
+    return jnp.log(theta)

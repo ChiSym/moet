@@ -2,8 +2,9 @@ import jax
 from jaxtyping import Array
 import jax.numpy as jnp
 from jaxtyping import Int, Float
-from moet.utils import categorical2d
+from moet.utils import categorical2d, to_tuple
 from genjax import gen
+from jax.tree_util import tree_flatten
 
 
 @gen
@@ -29,7 +30,7 @@ def tree_layer(
     mi_pairs_array: Float[Array, "n%2+n//2 n%2+n//2 4"] = jax.vmap(
         jax.vmap(mi_pairs, in_axes=(None, 0, None)), in_axes=(None, None, 0)
     )(θ, pairs, pairs)
-    θ = jnp.max(mi_pairs_array, axis=-1)
+    θ = jax.nn.logsumexp(mi_pairs_array, axis=-1)
     θ = jnp.where(jnp.eye(len(θ)), -jnp.inf, θ)
     logZ = jax.nn.logsumexp(θ)
     θ = θ - logZ
@@ -84,3 +85,12 @@ def pseudomarginal_layer(θ: Float[Array, "n n"], merges: Int[Array, "n//2"]):
     logprobs = θ.take(merges)
     cumsum = jax.vmap(lambda idx: jax.nn.logsumexp(logprobs[idx:]))(jnp.arange(k))
     return jnp.sum(logprobs - cumsum)
+
+
+def get_layer(trace, circuit_depth):
+    layer = [
+        trace.subtraces[f"{i}"].get_choices()["merge"] for i in range(circuit_depth)
+    ]
+    tree_layers = to_tuple(layer)
+    flat_layers, treedef = tree_flatten(tree_layers)
+    return jnp.array(flat_layers), treedef
