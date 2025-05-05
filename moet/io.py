@@ -2,6 +2,9 @@ import polars as pl
 import numpy as np
 import jax.numpy as jnp
 from jaxtyping import Float, Array
+from os import getenv
+
+ACCESS_TOKEN = getenv("HF_TOKEN")
 
 
 def discretize_dataframe(df: pl.DataFrame, n_bins: int = 20):
@@ -56,10 +59,12 @@ def load_huggingface(dataset_path):
         "test": f"{dataset_path}/data-test-full-num.parquet",
     }
     train_df = pl.read_parquet(
-        f"hf://datasets/Large-Population-Model/model-building-evaluation/{splits['train']}"
+        f"hf://datasets/Large-Population-Model/model-building-evaluation/{splits['train']}",
+        storage_options={"token": ACCESS_TOKEN},
     )
     test_df = pl.read_parquet(
-        f"hf://datasets/Large-Population-Model/model-building-evaluation/{splits['test']}"
+        f"hf://datasets/Large-Population-Model/model-building-evaluation/{splits['test']}",
+        storage_options={"token": ACCESS_TOKEN},
     )
 
     return train_df, test_df

@@ -1,13 +1,13 @@
-# from tensorflow_probability.substrates import jax as tfp
+from tensorflow_probability.substrates import jax as tfp
 from jaxtyping import Float, Array, Bool, Integer
 import jax.numpy as jnp
 import jax
 
-# from genjax import exact_density
+from genjax import exact_density
 import numpy as np
 
 
-# tfd = tfp.distributions
+tfd = tfp.distributions
 
 
 def mi(
@@ -36,9 +36,9 @@ def categorical2d_logpdf(v: Integer[Array, "2"], logits: Float[Array, "n n"]):
     return logits.at[v[0], v[1]].get()
 
 
-# categorical2d = exact_density(
-#     categorical2d_sample, categorical2d_logpdf, "categorical2d"
-# )
+categorical2d = exact_density(
+    categorical2d_sample, categorical2d_logpdf, "categorical2d"
+)
 
 
 def to_tuple(x):
@@ -51,13 +51,12 @@ def to_tuple(x):
 
 def get_mi_theta(train_data, n_mi_samples=10000, eps=1e-10):
     jitted_mi = jax.jit(jax.vmap(jax.vmap(mi, in_axes=(1, None)), in_axes=(None, 1)))
-    bool_data = train_data == 0
+    bool_data = (train_data[:n_mi_samples, :] == 0).astype(jnp.uint8)
     mi_estimates = jitted_mi(
-        bool_data[:n_mi_samples, :].astype(float),
-        bool_data[:n_mi_samples, :].astype(float),
+        bool_data,
+        bool_data,
     )
     theta = jnp.maximum(mi_estimates, eps)
     theta = jnp.where(jnp.eye(len(mi_estimates)), 0, theta)
     theta /= jnp.sum(theta)
-    theta = np.array(theta)
     return jnp.log(theta)

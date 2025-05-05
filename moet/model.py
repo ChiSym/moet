@@ -56,18 +56,21 @@ def circuit(
     return jax.nn.logsumexp(X)
 
 
-@partial(jax.jit, static_argnames=("layers_treedef"))
+@partial(jax.jit, static_argnames=("layers_treedef", "max_batch"))
 def loss_fn_per_example(
     X: Float[Array, "batch_size n_inputs input_dim"],
     Qs: PyTree[Float[Array, "?n_inputs ?output_dim ?input_dim"], "T"],
     W: Float[Array, "n_outputs"],
     layers_flat: Integer[Array, "flat_layers"],
     layers_treedef: PyTreeDef,
+    max_batch: int,
 ) -> Float[Array, "batch_size"]:
     layers = jax.tree.unflatten(layers_treedef, layers_flat)
     pad = jnp.zeros_like(X[0:1])
     X_pad = jnp.concatenate([X, pad], axis=0)
-    out = jax.vmap(circuit, in_axes=(0, None, None, None))(X_pad, Qs, W, layers)
+    def compute_loss_per_batch(x):
+        return circuit(x, Qs, W, layers)
+    out = jax.lax.map(compute_loss_per_batch, X_pad, batch_size=max_batch)
     log_Z = out[-1]
     return -(out[:-1] - log_Z)
 
