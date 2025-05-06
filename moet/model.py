@@ -10,13 +10,13 @@ def circuit_layer(
     X: Float[Array, "n_inputs input_dim"],
     Q: Float[Array, "n_inputs output_dim input_dim"],
     merge: PyTree[Integer[Array, ""]],
-) -> Float[Array, "n_outputs output_dim"]:
+    normalize: bool = False,
+):
     n_inputs = X.shape[0]
     k, arity = len(merge), len(merge[0])
     Y: Float[Array, "n_inputs output_dim"] = jax.nn.logsumexp(
         Q + X[:, None, :], axis=-1
     )
-
     merge_flat, treedef = jax.tree.flatten(merge)
     merge_flat: Integer[Array, "k_times_arity"] = jnp.array(merge_flat)
     not_in_merge = ~jnp.isin(jnp.arange(n_inputs), merge_flat)
@@ -35,7 +35,12 @@ def circuit_layer(
     output: Float[Array, "k+n_inputs-k_times_arity output_dim"] = jnp.concatenate(
         [Y_merge, Y_pass_through], axis=0
     )
-    return output
+
+    if normalize:
+        Q = Q + X[:, None, :] - Y[..., None]
+        return output, Q
+
+    return output, None
 
 
 @jaxtyped(typechecker=typechecker)
@@ -44,16 +49,28 @@ def circuit(
     Qs: PyTree[Float[Array, "?n_inputs ?output_dim ?input_dim"], "T"],
     W: Float[Array, "n_outputs"],
     layers: PyTree[Integer[Array, ""]],
-) -> Float[Array, ""]:
+    normalize: bool = False,
+):
     n_inputs = X.shape[0]
+    new_Qs = []
     for Q, layer in zip(Qs, layers):
         n_outputs = n_inputs // len(layer[0])
-        X = circuit_layer(X, Q, layer)
+        X, new_Q = circuit_layer(X, Q, layer, normalize)
         n_inputs -= n_outputs
+        if normalize:
+            new_Qs.append(new_Q)
+
+    new_Qs = tuple(new_Qs)
 
     assert X.shape[0] == 1
     X = W + X[0]
-    return jax.nn.logsumexp(X)
+
+    logp = jax.nn.logsumexp(X)
+
+    if normalize:
+        new_W = W - jax.nn.logsumexp(W)
+        return logp, new_Qs, new_W
+    return logp
 
 
 @partial(jax.jit, static_argnames=("layers_treedef", "max_batch"))
