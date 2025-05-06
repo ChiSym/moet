@@ -1,6 +1,5 @@
 import polars as pl
 import numpy as np
-import jax.numpy as jnp
 from jaxtyping import Float, Array
 from os import getenv
 
@@ -109,8 +108,8 @@ def load_data(dataset_path):
     bool_data, col_names = dummies_to_padded_array(dummies_df, categorical_idxs)
 
     bool_data = np.where(np.any(bool_data, axis=-1)[..., None], bool_data, True)
-    data: Float[Array, "batch_size n_inputs input_dim"] = jnp.where(
-        bool_data, 0, -jnp.inf
+    data: Float[Array, "batch_size n_inputs input_dim"] = np.where(
+        bool_data, 0, -np.inf
     )
 
     train_data = np.array(data[: len(train_df)])
