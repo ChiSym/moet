@@ -4,6 +4,7 @@ import jax
 from beartype import beartype as typechecker
 from functools import partial
 import functools
+from jax import tree_flatten, tree_unflatten
 
 @jaxtyped(typechecker=typechecker)
 def circuit_layer(
@@ -17,14 +18,14 @@ def circuit_layer(
     Y: Float[Array, "n_inputs output_dim"] = jax.nn.logsumexp(
         Q + X[:, None, :], axis=-1
     )
-    merge_flat, treedef = jax.tree.flatten(merge)
+    merge_flat, treedef = tree_flatten(merge)
     merge_flat: Integer[Array, "k_times_arity"] = jnp.array(merge_flat)
     not_in_merge = ~jnp.isin(jnp.arange(n_inputs), merge_flat)
     pass_through = jnp.argwhere(not_in_merge, size=n_inputs - k * arity)[:, 0]
     Y_pass_through: Float[Array, "n_inputs-k_times_arity output_dim"] = Y[pass_through]
 
     Y_merge_flat: Float[Array, "k_times_arity output_dim"] = Y[merge_flat]
-    Y_merge_tree: PyTree[Float[Array, "output_dim"]] = jax.tree.unflatten(
+    Y_merge_tree: PyTree[Float[Array, "output_dim"]] = tree_unflatten(
         treedef, Y_merge_flat
     )
     Y_merge: Float[Array, "k arity output_dim"] = jnp.stack(
@@ -94,12 +95,12 @@ def make_step(step_key):
 
 @partial(jax.jit, static_argnames=("layers_treedef"))
 def sample_circuit(layers_treedef, key, Qs, W, flat_layers):
-    layers = jax.tree.unflatten(layers_treedef, flat_layers)
+    layers = tree_unflatten(layers_treedef, flat_layers)
     W = W[None, :]
     for Q, layer in zip(Qs[::-1], layers[::-1]):
         # compute a pure-Python step key for this layer connectivity
         k = len(layer)
-        merge_leaves, _ = jax.tree.flatten(layer)
+        merge_leaves, _ = tree_flatten(layer)
         mapping = jnp.array(merge_leaves)
         # each leaf is a 1-element array, extract scalar ints to build mapping
         arity = len(merge_leaves) // k
@@ -177,12 +178,12 @@ def loss_fn_per_example(
     layers_treedef: PyTreeDef,
     max_batch: int,
 ) -> Float[Array, "batch_size"]:
-    layers = jax.tree.unflatten(layers_treedef, layers_flat)
+    layers = tree_unflatten(layers_treedef, layers_flat)
     pad = jnp.zeros_like(X[0:1])
     X_pad = jnp.concatenate([X, pad], axis=0)
     def compute_loss_per_batch(x):
         return circuit(x, Qs, W, layers)
-    out = jax.lax.map(compute_loss_per_batch, X_pad, batch_size=max_batch)
+    out = jax.vmap(compute_loss_per_batch)(X_pad)
     log_Z = out[-1]
     return -(out[:-1] - log_Z)
 

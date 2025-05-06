@@ -4,7 +4,8 @@ import jax.numpy as jnp
 from jaxtyping import Int, Float
 from moet.utils import categorical2d, to_tuple
 from genjax import gen
-from jax.tree_util import tree_flatten
+# from jax.tree_util import tree_flatten
+from jax import tree_flatten
 
 
 @gen
