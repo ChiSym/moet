@@ -28,7 +28,6 @@ n_categories = int(n_categories)
 max_categories = int(max_categories)
 
 # n_clusters = [512, 256, 128, 64, 32, 16]
-n_clusters = [512, 256, 128, 64, 32]
 # %%
 import optax
 from moet.model import loss_fn
@@ -44,13 +43,6 @@ batch_size = 1000
 max_batches = train_data.shape[0] // batch_size
 peak_value = 2.5e-2
 
-# schedule = optax.linear_onecycle_schedule(
-#     transition_steps=n_epochs * max_batches,       # total steps
-#     peak_value=peak_value,             # your max LR
-#     pct_start=0.1,               # 10% of 2k steps spent ramping up
-#     div_factor=100,              # start at LR_max/100
-#     final_div_factor=1e4,        # end at LR_max/1e4
-# )
 optimizer = optax.chain(
     optax.clip_by_global_norm(1.0),
     optax.lion(
@@ -58,23 +50,6 @@ optimizer = optax.chain(
     ),
 )
 
-
-# # 1. Hyper‑parameters for the LR Finder
-# lr_start, lr_end = 1e-5, 10.0
-
-# # 2. Build a "log‑space" linear scheduler, then exponentiate to get an exponential ramp
-# log_lr_schedule = optax.linear_schedule(
-#     init_value=jnp.log(lr_start),
-#     end_value=jnp.log(lr_end),
-#     transition_steps=max_batches
-# )
-# exp_lr_schedule = lambda step: jnp.exp(log_lr_schedule(step))
-
-# # 3. Plug that schedule into your optimizer
-# optimizer = optax.chain(
-#     optax.clip_by_global_norm(1.0),
-#     optax.lion(learning_rate=exp_lr_schedule)
-# )
 
 from moet.model import loss_fn_per_example
 
@@ -149,7 +124,10 @@ def run_depth_experiment(
 
 # %%
 # get a treedef
+
 depth = 5
+n_clusters = [128 // 2**i for i in range(depth)]
+# n_clusters = [512, 256, 128, 64, 32]
 
 key = jax.random.PRNGKey(0)
 key, subkey = jax.random.split(key)
@@ -193,35 +171,21 @@ def boost_iter(
 
     return logps, Qs, W, flat_layers, loss_per_example, train_losses, test_losses
 
-# %%
-def compute_ess(logw):
-    L1 = jax.nn.logsumexp(logw)
-    L2 = jax.nn.logsumexp(2*logw)
-    log_ESS = 2*L1 - L2
-    ESS = jnp.exp(log_ESS)
-    return ESS
-
-def clip_k(logw, k):
-    sorted_logw = jnp.sort(logw)
-    k_plus_1_value = sorted_logw[-k-1]
-    
-    clipped_logw = jnp.where(logw > k_plus_1_value, k_plus_1_value, logw)
-    
-    return clipped_logw
-
 
 # %%
 @partial(jax.jit, static_argnames=("shape",))
 def sample_categorical(key, logits, shape):
     return jax.random.categorical(key, logits, shape=shape)
 
-from moet.utils import get_mi_theta
-
-theta = get_mi_theta(train_data, n_mi_samples=10000)
+# %%
+# theta = get_mi_theta(train_data, n_mi_samples=10000)
+theta = uniform_theta
 
 n_trees = 1
-n_boost_iter = 5
-target_ess_ratio = 1
+n_boost_iter = 1
+N = train_data.shape[0]
+# l = 1
+l = .9
 key = jax.random.PRNGKey(0)
 # batch_idxs = jax.random.permutation(key, jnp.arange(batch_size * max_batches)).reshape(max_batches, batch_size)
 batch_idxs = jnp.arange(batch_size * max_batches).reshape(max_batches, batch_size)
@@ -232,7 +196,6 @@ key = jax.random.PRNGKey(0)
 theta_list = []
 prev_params = None
 for i in range(n_boost_iter):
-    target_ess_ratio *= 2/3
     eps = 1e-5
     chow_liu_theta = theta / eps
     logz = jax.nn.logsumexp(chow_liu_theta.flatten(), axis=-1)
@@ -251,15 +214,11 @@ for i in range(n_boost_iter):
         prev_params,
     )
     key, subkey = jax.random.split(key)
-    importance_weights = jax.nn.log_softmax(-loss_per_example)
-    ess = compute_ess(importance_weights)
-    if ess < target_ess_ratio * train_data.shape[0]:
-        importance_weights = clip_k(importance_weights, int(target_ess_ratio * train_data.shape[0]))
-        importance_weights = jax.nn.log_softmax(importance_weights)
+    O = (-l * jnp.exp(-loss_per_example) + 1./N) / (1 - l)
     # batch_idxs = sample_categorical(subkey, importance_weights, (max_batches, batch_size))
-    mi_idxs = sample_categorical(subkey, importance_weights, (10000,))
+    mi_idxs = sample_categorical(subkey, jnp.log(O), (10000,))
     mi_data = train_data[mi_idxs]
-    theta = get_mi_theta(mi_data, n_mi_samples=10000)
+    # theta = get_mi_theta(mi_data, n_mi_samples=10000)
     models.append({
         "logps": logps,
         "n_trees": n_trees,
@@ -269,12 +228,140 @@ for i in range(n_boost_iter):
         "flat_layers": flat_layers,
         "train_losses": train_losses,
         "test_losses": test_losses,
-        "importance_weights": importance_weights,
+        "O": O,
+        "l": l,
         "mi_idxs": mi_idxs,
         "loss_per_example": loss_per_example,
     })
     prev_params = (Qs, W, flat_layers)
     n_trees += 1
+
+# %%
+from moet.model import circuit
+mock_data = jnp.zeros_like(train_data[0])
+layers = jax.vmap(jax.tree.unflatten, in_axes=(None, 0))(treedef, flat_layers)
+
+# %%
+logZ, new_Qs, new_W = jax.vmap(circuit, in_axes=(None, 0, 0, 0, None))(mock_data, Qs, W, layers, True)
+# logZ, new_Qs, new_W = jax.jit(jax.vmap(circuit, in_axes=(None, 0, 0, 0, None)))(mock_data, Qs, W, layers, True)
+
+# %%
+from moet.model import sample_circuit
+subkeys = jax.random.split(key, 1000)
+partial_sample_circuit = partial(sample_circuit, treedef)
+sample_jit = jax.jit(jax.vmap(jax.vmap(partial_sample_circuit, in_axes=(None, 0, 0, 0)), 
+                              in_axes=(0, None, None, None)))
+
+samples = sample_jit(subkeys, new_Qs, new_W, flat_layers)
+samples.shape
+
+# %%
+from moet.model import make_step
+
+# 1) Precompute your step functions:
+step_fns = []
+for layer in layers:
+    # layer is a PyTree of 1-element integer arrays
+    flat_leaves, _ = jax.tree_flatten(layer)
+    k = len(layer)
+    arity = len(layer[0])
+    # extract Python ints
+    mapping_tuple = tuple(int(leaf.tolist()[0]) // arity for leaf in flat_leaves)
+    step_key = (k, arity, mapping_tuple)
+    step_fns.append(make_step(step_key))
+
+# 2) Build a tiny sampler that only uses the already-jitted steps:
+def sample_one(key, Qs):
+    W1 = new_W[None, :]     # close‐over your base W
+    for Q, step in zip(Qs[::-1], reversed(step_fns)):
+        W1, key = step(W1, key, Q)
+    z = jax.nn.one_hot(jax.random.categorical(key, W1, axis=-1), W1.shape[-1])
+    return z
+
+# 3) vmap & jit over (key, Qs):
+batched_sample = jax.jit(jax.vmap(jax.vmap(sample_one, in_axes=(None, 0)), in_axes=(0, None)))
+keys = jax.random.split(key, batch_size)
+# new_Qs has shape [batch_size, …]
+all_z = batched_sample(keys, new_Qs)
+
+
+# %%
+single_sampler = lambda key: jax.vmap(sample_circuit, in_axes=(None, 0, 0, 0))(key, new_Qs, new_W, layers)
+
+# 2) vmapped version that runs one sample per key
+batched_sampler = jax.vmap(single_sampler)   # maps over the 0th axis of key
+
+# (optional) JIT‐compile the whole thing so you only pay one XLA compile
+batched_sampler = jax.jit(batched_sampler)
+
+# 3) draw N independent keys and get N samples in one call
+master_key = jax.random.PRNGKey(0)
+batch_size = 128
+keys = jax.random.split(master_key, batch_size)
+
+# %%
+with jax.disable_jit():
+    # this returns an array of shape [batch_size, n_outputs]
+    all_z = batched_sampler(keys)
+
+# %%
+type(layers)
+
+# %%
+len(layers)
+
+# %%
+flat, treedef = jax.tree_flatten(layers[0])
+print("layer[0] treedef:", treedef)
+print("  leaves:", [leaf.shape for leaf in flat], flat)
+
+
+# %%
+from moet.model import sample_circuit
+from jaxtyping import Float, Array, Integer
+
+# %%
+
+# %%
+# Q: Float[Array, "n_inputs output_dim input_dim"] = new_Qs[-1][0]
+Qs = jax.tree_util.tree_map(lambda x: x[0], new_Qs)
+layers = jax.tree_util.tree_map(lambda x: x[0], layers)
+
+# %%
+# %%
+jnp.sum(Y)
+# %%
+jax.nn.logsumexp(W)
+
+
+# %%
+Q_merge_flat = Q[merge_flat]
+Q_merge_tree = jax.tree.unflatten(treedef, Q_merge_flat)
+Q_merge: Float[Array, "k arity output_dim"] = jnp.stack(
+    [jnp.stack(y) for y in Q_merge_tree]
+)
+Q_merge.shape
+
+
+# %%
+pass_through = jnp.argwhere(not_in_merge, size=n_outputs - k * arity)[:, 0]
+Y_pass_through: Float[Array, "n_outputs-k_times_arity output_dim"] = Y[pass_through]
+
+
+
+# %%
+Q[:, z]
+Q.shape
+
+# %%
+layer
+
+# %%
+jax.vmap(z
+
+# %%
+# %%
+W = Q[z]  # figure out which dimension of this to use
 
 # %%
 theta_list[1]
@@ -288,6 +375,18 @@ k = int(.05 * train_data.shape[0])
 k_plus_1_value = sorted_logw[-k-1]
 k_plus_1_value
 
+# %%
+jnp.exp(-models[0]["loss_per_example"])
+
+# %%
+models[0]["l"]
+
+# %%
+models[0]["loss_per_example"]).sort()
+
+# %%
+models[0].keys()
+
 
 # %%
 # Plot the softmax of current_logps for model[0]
@@ -298,21 +397,25 @@ import jax.nn
 # current_logps = models[0]["current_logps"]
 
 # Apply softmax to convert log probabilities to probabilities
-probabilities = jnp.exp(models[0]["importance_weights"]).sort()
+# O = jnp.sort(models[0]["O"] / jnp.sum(models[0]["O"]))
+O = jnp.sort(jnp.exp(-models[0]["loss_per_example"]))
 
 # Create a figure and axis
 plt.figure(figsize=(10, 6))
 
 # Plot the probabilities
-plt.plot(probabilities)
+plt.plot(O)
 plt.xlabel('Data Point Index')
 plt.ylabel('Probability')
-plt.title('Softmax of -current_logps for Model 0')
+plt.title('Q_1(x), sorted')
 plt.grid(True)
 plt.tight_layout()
 
 # Show the plot
 plt.show()
+
+# %%
+O
 
 
 # %%
@@ -377,7 +480,10 @@ jnp.mean(models[3]["loss_per_example"])
 
 
 # %%
-models[0]["train_losses"][-1]
+jnp.sum(models[1]["O"]) ** 2 / jnp.sum(models[1]["O"] ** 2)
+
+# %%
+models[0]["O"]/jnp.sum(models[0]["O"])
 
 # %%
 models[1]["train_losses"][-1]
