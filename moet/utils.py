@@ -14,11 +14,14 @@ tfd = tfp.distributions
 def get_marginals(
     x1: Float[Array, "batch_size input_dim"], x2: Float[Array, "batch_size input_dim"]
 ) -> Float[Array, ""]:
+    N = x1.shape[0]
+    n_missing1 = jnp.sum(jnp.all(x1 == 1, axis=1))
+    n_missing2 = jnp.sum(jnp.all(x2 == 1, axis=1))
     p_xy = x1.T @ x2
     p_xy = p_xy / jnp.sum(p_xy)
     logp_xy = jnp.log(p_xy)
-    logp_x = jnp.log(jnp.sum(x1, axis=0) / jnp.sum(x1))
-    logp_y = jnp.log(jnp.sum(x2, axis=0) / jnp.sum(x2))
+    logp_x = jnp.log(jnp.sum(x1, axis=0) / (N - n_missing1))
+    logp_y = jnp.log(jnp.sum(x2, axis=0) / (N - n_missing2))
     return logp_xy, logp_x, logp_y
 
 def mi_from_logp(logp_xy, logp_x, logp_y):
