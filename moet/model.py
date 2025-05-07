@@ -52,12 +52,9 @@ def circuit(
     layers: PyTree[Integer[Array, ""]],
     normalize: bool = False,
 ):
-    n_inputs = X.shape[0]
     new_Qs = []
     for Q, layer in zip(Qs, layers):
-        n_outputs = n_inputs // len(layer[0])
         X, new_Q = circuit_layer(X, Q, layer, normalize)
-        n_inputs -= n_outputs
         if normalize:
             new_Qs.append(new_Q)
 
@@ -75,98 +72,48 @@ def circuit(
 
 # @functools.lru_cache(maxsize=None)
 def make_step(step_key):
-    # unpack the static step key with (k, arity, mapping_tuple)
     k, arity, mapping = step_key
 
-    @jax.jit
+    # @jax.jit
     def step(W, key, Q):
         key, subkey = jax.random.split(key)
         z = jax.nn.one_hot(
             jax.random.categorical(subkey, W, axis=-1),
             W.shape[-1])
         z_merge, z_pass = jnp.split(z, [k], axis=0)
-        Y_merge = z_merge[mapping]
+        Y_merge = z_merge[mapping]  # could be a problem with ordering
         Y = jnp.concatenate([Y_merge, z_pass], axis=0)
-        # import ipdb; ipdb.set_trace()
-        newW = jnp.einsum("no,noi->ni", Y, Q)
-        return newW, key
+
+        idx = jnp.argmax(Y, axis=1)
+        newW = Q[jnp.arange(Y.shape[0]), idx, :]
+
+        return newW, z, key
 
     return step
 
-@partial(jax.jit, static_argnames=("layers_treedef"))
+# @partial(jax.jit, static_argnames=("layers_treedef"))
 def sample_circuit(layers_treedef, key, Qs, W, flat_layers):
     layers = tree_unflatten(layers_treedef, flat_layers)
     W = W[None, :]
+    zs = []
     for Q, layer in zip(Qs[::-1], layers[::-1]):
-        # compute a pure-Python step key for this layer connectivity
         k = len(layer)
         merge_leaves, _ = tree_flatten(layer)
-        mapping = jnp.array(merge_leaves)
-        # each leaf is a 1-element array, extract scalar ints to build mapping
         arity = len(merge_leaves) // k
+        merge_leaves = jnp.array(merge_leaves)
+        groups = jnp.arange(merge_leaves.shape[0]) // arity
+        mapping = groups[jnp.argsort(merge_leaves)]
         step_key = (k, arity, mapping)
-        # retrieve or compile the step function for this key
         step = make_step(step_key)
-        W, key = step(W, key, Q)
+        W, z, key = step(W, key, Q)
+        zs.append(z)
+
     z = jax.nn.one_hot(
         jax.random.categorical(key, W, axis=-1),
         W.shape[-1])
-    return z
 
-# def sample_circuit(key: jax.random.PRNGKey,
-#     Qs: PyTree[Float[Array, "?n_inputs ?output_dim ?input_dim"], "T"],
-#     W: Float[Array, "n_outputs"],
-#     layers: PyTree[Integer[Array, ""]],
-# ):
-#     W = W[None, :]
-#     layers_mapping = [jnp.array(jax.tree.flatten(layer)[0]) // len(layer[0]) 
-#                    for layer in layers]
-#     layers_mapping = jnp.stack(layers_mapping)
-#     ks = [len(layer) for layer in layers]
-
-#     # TODO put this in a scan
-#     def scan_fn(carry, inputs):
-#         W, key = carry
-#         Q, layer_mapping, k = inputs
-        
-#         key, subkey = jax.random.split(key)
-#         z = jax.random.categorical(subkey, W, axis=-1)
-#         z = jax.nn.one_hot(z, W.shape[-1])
-        
-#         z_merge = z[:k]
-#         Y_pass_through = z[k:]
-        
-#         Y_merge = jnp.take(z_merge, layer_mapping, axis=0)
-#         Y = jnp.concatenate([Y_merge, Y_pass_through], axis=0)
-#         W = jnp.einsum("no,noi->ni", Y, Q)
-        
-#         return (W, key), None
-    
-#     import ipdb; ipdb.set_trace()
-#     # Run the scan
-#     reversed_inputs = (Qs[::-1], layers_mapping[::-1], ks[::-1])
-#     remat_scan = jax.checkpoint(lambda carry, xs: jax.lax.scan(scan_fn, carry, xs))
-#     (W, key), _ = remat_scan((W, key), reversed_inputs)
-#     z = jax.random.categorical(key, W, axis=-1)
-#     z = jax.nn.one_hot(z, W.shape[-1])
-#     return z
-
-
-# for Q, layer in reversed(list(zip(Qs, layers))):
-#     key, subkey = jax.random.split(key)
-#     z = jax.random.categorical(subkey, W, axis=-1)
-#     z = jax.nn.one_hot(z, W.shape[-1])
-#     n_inputs = Q.shape[0]
-#     k , arity = len(layer), len(layer[0])
-#     z_merge = z[:k]
-#     Y_pass_through = z[k:]
-#     merge_flat, treedef = jax.tree.flatten(layer)
-#     merge_flat: Integer[Array, "k_times_arity"] = jnp.array(merge_flat)
-#     Y_merge = jax.vmap(lambda idx: z_merge[jnp.argwhere(merge_flat == idx, size=1)[0][0] // arity])(
-#         jnp.arange(k * arity))
-#     Y = jnp.concatenate([Y_merge, Y_pass_through], axis=0)
-#     W = jnp.einsum("no,noi->ni", Y, Q)
-
+    zs.append(z)
+    return zs
 
 
 @partial(jax.jit, static_argnames=("layers_treedef", "max_batch"))
