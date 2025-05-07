@@ -102,7 +102,7 @@ def run_depth_experiment(
         Qs, W, flat_layers = jax.vmap(select_params)(trees)
 
     key, subkey = jax.random.split(key)
-    logps = jax.random.normal(key, (n_trees))
+    logps = jax.random.normal(key, (n_trees, ))
 
     opt_state = optimizer.init((logps, Qs, W))
 
@@ -129,7 +129,7 @@ depth = 5
 n_clusters = [128 // 2**i for i in range(depth)]
 # n_clusters = [512, 256, 128, 64, 32]
 
-key = jax.random.PRNGKey(0)
+key = jax.random.PRNGKey(1234)
 key, subkey = jax.random.split(key)
 uniform_theta = 1 - jnp.eye(n_categories)
 uniform_theta = uniform_theta / jnp.sum(uniform_theta)
@@ -186,22 +186,20 @@ n_boost_iter = 1
 N = train_data.shape[0]
 # l = 1
 l = .9
-key = jax.random.PRNGKey(0)
-# batch_idxs = jax.random.permutation(key, jnp.arange(batch_size * max_batches)).reshape(max_batches, batch_size)
+key = jax.random.PRNGKey(1234)
 batch_idxs = jnp.arange(batch_size * max_batches).reshape(max_batches, batch_size)
 current_logps = -jnp.inf * jnp.ones(train_data.shape[0])
 models = []
 
-key = jax.random.PRNGKey(0)
 theta_list = []
 prev_params = None
 for i in range(n_boost_iter):
+    key, subkey = jax.random.split(key)
     eps = 1e-5
     chow_liu_theta = theta / eps
     logz = jax.nn.logsumexp(chow_liu_theta.flatten(), axis=-1)
     chow_liu_theta = chow_liu_theta - logz
     theta_list.append(chow_liu_theta)
-    key, subkey = jax.random.split(key)
 
     logps, Qs, W, flat_layers, loss_per_example, train_losses, test_losses = boost_iter(
         subkey,
@@ -213,11 +211,10 @@ for i in range(n_boost_iter):
         jitted_gradient_step,
         prev_params,
     )
-    key, subkey = jax.random.split(key)
     O = (-l * jnp.exp(-loss_per_example) + 1./N) / (1 - l)
     # batch_idxs = sample_categorical(subkey, importance_weights, (max_batches, batch_size))
-    mi_idxs = sample_categorical(subkey, jnp.log(O), (10000,))
-    mi_data = train_data[mi_idxs]
+    # mi_idxs = sample_categorical(subkey, jnp.log(O), (10000,))
+    # mi_data = train_data[mi_idxs]
     # theta = get_mi_theta(mi_data, n_mi_samples=10000)
     models.append({
         "logps": logps,
@@ -230,304 +227,78 @@ for i in range(n_boost_iter):
         "test_losses": test_losses,
         "O": O,
         "l": l,
-        "mi_idxs": mi_idxs,
+        # "mi_idxs": mi_idxs,
         "loss_per_example": loss_per_example,
     })
     prev_params = (Qs, W, flat_layers)
     n_trees += 1
 
 # %%
+jax.config.update("jax_debug_nans", True)
+
 from moet.model import circuit
 mock_data = jnp.zeros_like(train_data[0])
-layers = jax.vmap(jax.tree.unflatten, in_axes=(None, 0))(treedef, flat_layers)
+layers = jax.vmap(jax.tree_unflatten, in_axes=(None, 0))(treedef, flat_layers)
 
 # %%
 logZ, new_Qs, new_W = jax.vmap(circuit, in_axes=(None, 0, 0, 0, None))(mock_data, Qs, W, layers, True)
 # logZ, new_Qs, new_W = jax.jit(jax.vmap(circuit, in_axes=(None, 0, 0, 0, None)))(mock_data, Qs, W, layers, True)
 
 # %%
-from moet.model import sample_circuit
-subkeys = jax.random.split(key, 1000)
-partial_sample_circuit = partial(sample_circuit, treedef)
-sample_jit = jax.jit(jax.vmap(jax.vmap(partial_sample_circuit, in_axes=(None, 0, 0, 0)), 
-                              in_axes=(0, None, None, None)))
-
-samples = sample_jit(subkeys, new_Qs, new_W, flat_layers)
-samples.shape
-
-# %%
-from moet.model import make_step
-
-# 1) Precompute your step functions:
-step_fns = []
-for layer in layers:
-    # layer is a PyTree of 1-element integer arrays
-    flat_leaves, _ = jax.tree_flatten(layer)
-    k = len(layer)
-    arity = len(layer[0])
-    # extract Python ints
-    mapping_tuple = tuple(int(leaf.tolist()[0]) // arity for leaf in flat_leaves)
-    step_key = (k, arity, mapping_tuple)
-    step_fns.append(make_step(step_key))
-
-# 2) Build a tiny sampler that only uses the already-jitted steps:
-def sample_one(key, Qs):
-    W1 = new_W[None, :]     # close‐over your base W
-    for Q, step in zip(Qs[::-1], reversed(step_fns)):
-        W1, key = step(W1, key, Q)
-    z = jax.nn.one_hot(jax.random.categorical(key, W1, axis=-1), W1.shape[-1])
-    return z
-
-# 3) vmap & jit over (key, Qs):
-batched_sample = jax.jit(jax.vmap(jax.vmap(sample_one, in_axes=(None, 0)), in_axes=(0, None)))
-keys = jax.random.split(key, batch_size)
-# new_Qs has shape [batch_size, …]
-all_z = batched_sample(keys, new_Qs)
-
-
-# %%
-single_sampler = lambda key: jax.vmap(sample_circuit, in_axes=(None, 0, 0, 0))(key, new_Qs, new_W, layers)
-
-# 2) vmapped version that runs one sample per key
-batched_sampler = jax.vmap(single_sampler)   # maps over the 0th axis of key
-
-# (optional) JIT‐compile the whole thing so you only pay one XLA compile
-batched_sampler = jax.jit(batched_sampler)
-
-# 3) draw N independent keys and get N samples in one call
-master_key = jax.random.PRNGKey(0)
-batch_size = 128
-keys = jax.random.split(master_key, batch_size)
-
-# %%
-with jax.disable_jit():
-    # this returns an array of shape [batch_size, n_outputs]
-    all_z = batched_sampler(keys)
-
-# %%
-type(layers)
-
-# %%
-len(layers)
-
-# %%
-flat, treedef = jax.tree_flatten(layers[0])
-print("layer[0] treedef:", treedef)
-print("  leaves:", [leaf.shape for leaf in flat], flat)
-
-
-# %%
-from moet.model import sample_circuit
-from jaxtyping import Float, Array, Integer
-
-# %%
-
-# %%
-# Q: Float[Array, "n_inputs output_dim input_dim"] = new_Qs[-1][0]
-Qs = jax.tree_util.tree_map(lambda x: x[0], new_Qs)
+new_Qs = jax.tree_util.tree_map(lambda x: x[0], new_Qs)
+new_W = new_W[0]
 layers = jax.tree_util.tree_map(lambda x: x[0], layers)
+flat_layers, treedef = jax.tree_util.tree_flatten(layers)
+flat_layers
 
 # %%
-# %%
-jnp.sum(Y)
-# %%
-jax.nn.logsumexp(W)
-
-
-# %%
-Q_merge_flat = Q[merge_flat]
-Q_merge_tree = jax.tree.unflatten(treedef, Q_merge_flat)
-Q_merge: Float[Array, "k arity output_dim"] = jnp.stack(
-    [jnp.stack(y) for y in Q_merge_tree]
-)
-Q_merge.shape
+from moet.model import sample_circuit
+key = jax.random.PRNGKey(0)
+partial_sample_circuit = partial(sample_circuit, treedef)
+subkeys = jax.random.split(key, 10000)
+samples = jax.vmap(partial_sample_circuit, in_axes=(0, None, None, None))(subkeys, new_Qs, new_W, flat_layers)
 
 
 # %%
-pass_through = jnp.argwhere(not_in_merge, size=n_outputs - k * arity)[:, 0]
-Y_pass_through: Float[Array, "n_outputs-k_times_arity output_dim"] = Y[pass_through]
-
-
-
-# %%
-Q[:, z]
-Q.shape
-
-# %%
-layer
-
-# %%
-jax.vmap(z
-
-# %%
-# %%
-W = Q[z]  # figure out which dimension of this to use
-
-# %%
-theta_list[1]
-
-# %%
-jax.nn.softmax(importance_weights).sort()
-
-# %%
-sorted_logw = jnp.sort(importance_weights)
-k = int(.05 * train_data.shape[0])
-k_plus_1_value = sorted_logw[-k-1]
-k_plus_1_value
-
-# %%
-jnp.exp(-models[0]["loss_per_example"])
-
-# %%
-models[0]["l"]
-
-# %%
-models[0]["loss_per_example"]).sort()
-
-# %%
-models[0].keys()
+from moet.utils import get_marginals
+x_idx = 2
+y_idx = 3
+sample_logp_xy, sample_logp_x, sample_logp_y = jax.jit(get_marginals)(samples[:, x_idx], samples[:, y_idx])
+sample_logp_x
 
 
 # %%
-# Plot the softmax of current_logps for model[0]
-import matplotlib.pyplot as plt
-import jax.nn
-
-# Get the current_logps from the first model
-# current_logps = models[0]["current_logps"]
-
-# Apply softmax to convert log probabilities to probabilities
-# O = jnp.sort(models[0]["O"] / jnp.sum(models[0]["O"]))
-O = jnp.sort(jnp.exp(-models[0]["loss_per_example"]))
-
-# Create a figure and axis
-plt.figure(figsize=(10, 6))
-
-# Plot the probabilities
-plt.plot(O)
-plt.xlabel('Data Point Index')
-plt.ylabel('Probability')
-plt.title('Q_1(x), sorted')
-plt.grid(True)
-plt.tight_layout()
-
-# Show the plot
-plt.show()
+data_logp_xy, data_logp_x, data_logp_y = jax.jit(get_marginals)(jnp.exp(train_data[:, x_idx]), jnp.exp(train_data[:, y_idx]))
+data_logp_x
 
 # %%
-O
-
-
-# %%
-import matplotlib.pyplot as plt
-
-# Extract train_losses from each model
-all_train_losses = [model["train_losses"] for model in models]
-all_test_losses = [model["test_losses"] for model in models]
-
-# Create a figure and axis
-plt.figure(figsize=(10, 6))
-
-# Plot each model's training losses
-for i, losses in enumerate(all_train_losses):
-    plt.plot(losses, label=f'Model {i+1}')
-
-for i, losses in enumerate(all_test_losses):
-    plt.plot(losses.repeat(100, axis=0), label=f'Test {i+1}', linestyle='--')
-
-
-
-# Add labels and title
-plt.xlabel('Iteration')
-plt.ylabel('Training Loss')
-plt.title('Training Loss Over Iterations')
-plt.legend()
-plt.grid(True)
-plt.tight_layout()
-
-# Show the plot
-plt.show()
+from moet.utils import make_1d_obs
+all_x = jax.vmap(make_1d_obs, in_axes=(None, 0, None, None))(x_idx, jnp.arange(max_categories), n_categories, max_categories)
+all_y = jax.vmap(make_1d_obs, in_axes=(None, 0, None, None))(y_idx, jnp.arange(max_categories), n_categories, max_categories)
+all_x
 
 # %%
-# Create a figure and axis
-plt.figure(figsize=(10, 6))
-for i, losses in enumerate(models[0][5].T):
-    plt.plot(losses[2:], label=f'Test {i+1}')
-
-# Add labels and title
-plt.xlabel('Iteration')
-plt.ylabel('Training Loss')
-plt.title('Training Loss Over Iterations')
-plt.legend()
-plt.grid(True)
-plt.tight_layout()
-
-# Show the plot
-plt.show()
-
+partial_circuit = partial(circuit, layers=layers)
+exact_logp_x = jax.vmap(jax.jit(partial_circuit), in_axes=(0, None, None))(all_x, new_Qs, new_W)
+exact_logp_y = jax.vmap(jax.jit(partial_circuit), in_axes=(0, None, None))(all_y, new_Qs, new_W)
 
 # %%
-jnp.mean(models[0]["loss_per_example"])
+jnp.exp(exact_logp_x)
 
 # %%
-jnp.mean(models[1]["loss_per_example"])
+jnp.exp(sample_logp_x)
 
 # %%
-jnp.mean(models[2]["loss_per_example"])
+jnp.exp(data_logp_x)
 
 # %%
-jnp.mean(models[3]["loss_per_example"])
-
-
-# %%
-jnp.sum(models[1]["O"]) ** 2 / jnp.sum(models[1]["O"] ** 2)
+jnp.exp(exact_logp_y)
 
 # %%
-models[0]["O"]/jnp.sum(models[0]["O"])
+jnp.exp(sample_logp_y)
 
 # %%
-models[1]["train_losses"][-1]
+jnp.exp(data_logp_y)
 
 # %%
-models[0][-2]
-# %%
-
-mi_idxs = sample_categorical(subkey, -models[0][-2], (10000,))
-mi_idxs
-# %%
-jnp.unique(mi_idxs)
-# %%
-# use python counter to count the number of unique values in mi_idxs
-from collections import Counter
-counter = Counter(np.array(mi_idxs))
-# %%
-max(counter.keys(), key=counter.get)
-# %%
-counter.most_common(10)
-
-
-# %%
-models[0][-2][33007]
-
-# %%
-probs = jax.nn.softmax(-models[0][-2])
-probs
-# %%
-probs[33007]
-# %%
-1/jnp.sum(probs**2)
-# %%
-data = az.load_arviz_data("non_centered_eight")
-log_likelihood = data.log_likelihood["obs"].stack(
-    __sample__=["chain", "draw"]
-)
-log_likelihood
-
-
-# %%
-
-# %%
-1/jnp.sum(jnp.exp(new_logprobs[0]) ** 2)
-
-
-# %%
+jnp.exp(exact_logp_y)
