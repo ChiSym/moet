@@ -18,27 +18,25 @@ train_data, test_data, col_names = load_data(dataset_path)
 train_data.shape
 
 # %%
-# %%
 from moet.trees import tree
 import genjax
-
 
 n_categories, max_categories = train_data.shape[1:]
 n_categories = int(n_categories)
 max_categories = int(max_categories)
 
-# n_clusters = [512, 256, 128, 64, 32, 16]
+# %%
+from tqdm import tqdm
+from moet.utils import weighted_marginals
+p_x, p_xy = weighted_marginals(train_data)
+
 # %%
 import optax
-from moet.model import loss_fn
-
-
-# %%
 from moet.model import make_circuit_parameters
 from functools import partial
 from moet.trees import get_layer
 
-n_epochs = 1
+# n_epochs = 1
 batch_size = 1000
 max_batches = train_data.shape[0] // batch_size
 peak_value = 2.5e-2
@@ -74,7 +72,7 @@ def gradient_step(opt_state, logps, Qs, W, flat_layers, batch, circuit_treedef):
 
 
 def run_depth_experiment(
-    key, thetas, train_data, batch_idxs, n_trees, circuit_depth, jitted_gradient_step, prev_params=None, n_epochs=2
+    key, thetas, train_data, importance_weights, batch_size, max_batches, n_trees, circuit_depth, jitted_gradient_step, prev_params=None, 
 ):
     key, subkey = jax.random.split(key)
     keys = jax.random.split(subkey, n_trees)
@@ -87,6 +85,8 @@ def run_depth_experiment(
 
     flat_layers = jax.vmap(get_flat_layer)(traces)
 
+    key, subkey = jax.random.split(key)
+    keys = jax.random.split(subkey, n_trees)
     Qs, W, _ = jax.vmap(make_circuit_parameters, in_axes=(0, None, None, None, None))(
         keys, circuit_depth, n_clusters, n_categories, max_categories
     )
@@ -102,33 +102,35 @@ def run_depth_experiment(
         Qs, W, flat_layers = jax.vmap(select_params)(trees)
 
     key, subkey = jax.random.split(key)
-    logps = jax.random.normal(key, (n_trees, ))
+    logps = jax.random.normal(subkey, (n_trees, ))
 
     opt_state = optimizer.init((logps, Qs, W))
 
-    all_train_losses = np.zeros(max_batches * n_epochs)
-    all_test_losses = np.zeros((max_batches * n_epochs) // 100)
+    all_train_losses = np.zeros(max_batches)
+    all_test_losses = np.zeros((max_batches) // 100)
 
-    for epoch in range(n_epochs):
-        for i, idxs in tqdm(enumerate(batch_idxs)):
-            batch = train_data[idxs]
-            (opt_state, logps, Qs, W), train_losses = jitted_gradient_step(opt_state, logps, Qs, W, flat_layers, batch)
-            all_train_losses[i + epoch * max_batches] = train_losses
+    for i in tqdm(range(max_batches)):
+        key, subkey = jax.random.split(key)
+        batch_idxs = sample_categorical(subkey, importance_weights, (batch_size, ))
+        batch = train_data[batch_idxs]
+        (opt_state, logps, Qs, W), train_losses = jitted_gradient_step(opt_state, logps, Qs, W, flat_layers, batch)
+        all_train_losses[i] = train_losses
 
-            if i % 100 == 0:
-                # test_losses = combined_tree_loss(logps, Qs, W, flat_layers, test_data, jitted_gradient_step._fun.keywords['circuit_treedef'])
-                test_losses = 0
-                all_test_losses[i // 100 + epoch * (max_batches // 100)] = test_losses
+            # if i % 100 == 0:
+            #     # test_losses = combined_tree_loss(logps, Qs, W, flat_layers, test_data, jitted_gradient_step._fun.keywords['circuit_treedef'])
+            #     test_losses = 0
+            #     all_test_losses[i // 100 + epoch * (max_batches // 100)] = test_losses
 
     return (logps, Qs, W, flat_layers), all_train_losses, all_test_losses
 
 # %%
 # get a treedef
+import math
 
-depth = 5
-n_clusters = [128 // 2**i for i in range(depth)]
-# n_clusters = [512, 256, 128, 64, 32]
-
+depth = math.ceil(math.log2(n_categories))
+# depth = 1
+n_clusters = [32 // 2**i for i in range(depth)]
+# n_clusters = [128, 1]
 key = jax.random.PRNGKey(1234)
 key, subkey = jax.random.split(key)
 uniform_theta = 1 - jnp.eye(n_categories)
@@ -136,10 +138,20 @@ uniform_theta = uniform_theta / jnp.sum(uniform_theta)
 uniform_theta = jnp.log(uniform_theta)
 trace = tree.simulate(key, (uniform_theta, genjax.Pytree.const(depth)))
 
-_, treedef = get_layer(trace, depth)
-Qs, W, _ = make_circuit_parameters(
-    subkey, depth, n_clusters, n_categories, max_categories
-)
+flat_layers, treedef = get_layer(trace, depth)
+layer = jax.tree_unflatten(treedef, flat_layers)
+layer
+
+# %%
+n_clusters
+
+# %%
+# depth = 2
+# layer = ((layer[0]), (i for i in range(13)))
+# flat_layers, treedef = jax.tree_util.tree_flatten(layer)
+
+# %%
+treedef
 
 # %%
 jitted_gradient_step = jax.jit(partial(gradient_step, circuit_treedef=treedef))
@@ -153,14 +165,16 @@ def boost_iter(
     key,
     thetas,
     train_data,
-    batch_idxs,
+    importance_weights,
+    batch_size,
+    max_batches,
     n_trees,
     depth,
     jitted_gradient_step,
     prev_params,
 ):
     (logps, Qs, W, flat_layers), train_losses, test_losses = run_depth_experiment(
-        key, thetas, train_data, batch_idxs, n_trees, depth, jitted_gradient_step, prev_params, n_epochs=n_epochs
+        key, thetas, train_data, importance_weights, batch_size, max_batches, n_trees, depth, jitted_gradient_step, prev_params, 
     )
 
     partial_combined_tree_loss_per_example = partial(combined_tree_loss_per_example, circuit_treedef=jitted_gradient_step._fun.keywords['circuit_treedef'])
@@ -174,64 +188,227 @@ def boost_iter(
 
 # %%
 @partial(jax.jit, static_argnames=("shape",))
-def sample_categorical(key, logits, shape):
-    return jax.random.categorical(key, logits, shape=shape)
+def sample_categorical(key, probs, shape):
+    return jax.random.choice(key, jnp.arange(len(probs)), p=probs, shape=shape)
+
 
 # %%
-# theta = get_mi_theta(train_data, n_mi_samples=10000)
-theta = uniform_theta
+from moet.utils import get_all_mis, get_theta, get_l
 
 n_trees = 1
-n_boost_iter = 1
+n_boost_iter = 2
 N = train_data.shape[0]
-# l = 1
-l = .9
+beta = .25
 key = jax.random.PRNGKey(1234)
-batch_idxs = jnp.arange(batch_size * max_batches).reshape(max_batches, batch_size)
-current_logps = -jnp.inf * jnp.ones(train_data.shape[0])
 models = []
-
 theta_list = []
 prev_params = None
+prev_logps = 0
+importance_weights = jnp.ones(N) / N
 for i in range(n_boost_iter):
     key, subkey = jax.random.split(key)
-    eps = 1e-5
-    chow_liu_theta = theta / eps
-    logz = jax.nn.logsumexp(chow_liu_theta.flatten(), axis=-1)
-    chow_liu_theta = chow_liu_theta - logz
-    theta_list.append(chow_liu_theta)
+    mi = get_all_mis(p_x, p_xy)
+    theta = get_theta(mi)
+    # theta_list.append(theta)
 
     logps, Qs, W, flat_layers, loss_per_example, train_losses, test_losses = boost_iter(
         subkey,
-        jnp.array(theta_list),
+        # jnp.array(theta_list),
+        jnp.array([theta]),
         train_data,
-        batch_idxs,
+        importance_weights / jnp.sum(importance_weights),
+        batch_size,
+        max_batches,
         n_trees,
         depth,
         jitted_gradient_step,
         prev_params,
     )
-    O = (-l * jnp.exp(-loss_per_example) + 1./N) / (1 - l)
-    # batch_idxs = sample_categorical(subkey, importance_weights, (max_batches, batch_size))
-    # mi_idxs = sample_categorical(subkey, jnp.log(O), (10000,))
-    # mi_data = train_data[mi_idxs]
-    # theta = get_mi_theta(mi_data, n_mi_samples=10000)
+    if i == 0:
+        running_loss_per_example = loss_per_example
+    else:
+        running_loss_per_example = jax.nn.logsumexp(jnp.array([jnp.log(beta) + loss_per_example, jnp.log(1 - beta) + running_loss_per_example]), axis=0)
+    normalized_loss_per_example = -running_loss_per_example
+    normalized_loss_per_example = normalized_loss_per_example - jax.nn.logsumexp(normalized_loss_per_example)
+    l = get_l(normalized_loss_per_example, beta)
+    importance_weights = jnp.maximum(l - (1 - beta) * N * jnp.exp(normalized_loss_per_example), 0) / beta
+    p_x, p_xy = weighted_marginals(train_data, importance_weights)
     models.append({
         "logps": logps,
         "n_trees": n_trees,
-        "theta_list": theta_list,
+        # "theta_list": theta_list,
         "Qs": Qs,
         "W": W,
         "flat_layers": flat_layers,
         "train_losses": train_losses,
         "test_losses": test_losses,
-        "O": O,
         "l": l,
-        # "mi_idxs": mi_idxs,
         "loss_per_example": loss_per_example,
+        "importance_weights": importance_weights,
+        "beta": beta,
+        "mi": mi,
+        "theta": theta,
+        "p_x": p_x,
+        "p_xy": p_xy,
     })
-    prev_params = (Qs, W, flat_layers)
-    n_trees += 1
+    # prev_params = (Qs, W, flat_layers)
+    # n_trees += 1
+    print(jnp.mean(running_loss_per_example))
+
+# %%
+p_x
+
+# %%
+mi
+
+# %%
+theta
+
+# %%
+models[0]["train_losses"][-100:]
+
+# %%
+models[1]["train_losses"][-100:]
+
+# %%
+
+
+# %%
+models[0]["importance_weights"]
+
+# %%
+running_loss_per_example = jax.nn.logsumexp(jnp.array([jnp.log(beta) + loss_per_example, jnp.log(1 - beta) + running_loss_per_example]), axis=0)
+
+# %%
+jnp.mean(running_loss_per_example)
+
+# %%
+# normalized_probs = importance_weights / N
+batch_idxs = sample_categorical(importance_weights / jnp.sum(importance_weights)).reshape(max_batches, batch_size)
+
+# %%
+jnp.sum(importance_weights / N)
+
+# %%
+
+
+
+
+# %%
+p_x, p_xy = weighted_marginals(train_data, importance_weights)
+
+# %%
+idx_x = 0
+idx_y = 1
+
+# %%
+- jnp.log(p_x[idx_x])[:, None] - jnp.log(p_x[idx_y])[None, :]
+
+# %%
+- jnp.sum(p_xy * (jnp.log(p_xy) - jnp.log(p_x[:, None]) - jnp.log(p_y[None, :])))
+
+# %%
+p_xy
+
+# %%
+mi = get_all_mis(p_x, p_xy)
+mi
+
+# %%
+theta = get_theta(mi)
+theta
+
+# %%
+print(jnp.mean(loss_per_example))
+
+# %%
+data_px, data_pxy = weighted_marginals(train_data)
+data_px
+
+# %%
+logp, new_Qs, new_W = circuit(jnp.array(train_data[-100]), jax.tree_util.tree_map(lambda x: x[0], models[0]["Qs"]), models[0]["W"][0], layer)
+
+
+# %%
+from moet.model import circuit
+layer = jax.tree_unflatten(treedef, flat_layers[0])
+logp = circuit(train_data[0], jax.tree_util.tree_map(lambda x: x[0], models[0]["Qs"]), models[0]["W"][0], layer, True)
+
+
+# %%
+logZ, new_Qs, new_W = circuit(jnp.zeros_like(train_data[0]), jax.tree_util.tree_map(lambda x: x[0], Qs), W[0], layer, True)
+logZ
+
+# %%
+layers
+
+
+# %%
+models[0]["Qs"][0]
+
+
+# %%
+from moet.utils import get_l_candidates
+# compute l_candidates
+logps = -models[0]["loss_per_example"]
+logps -= jax.nn.logsumexp(logps)
+ps_sorted = jnp.sort(jnp.exp(logps))
+l_candidates = get_l_candidates(ps_sorted, models[0]["beta"])
+l_candidates
+# %%
+normalized_loss_per_example = logps
+beta = .25
+l = get_l(normalized_loss_per_example, beta)
+l
+
+# %%
+l
+
+# %%
+importance_weights = jnp.maximum((l / N) - (1 - beta) * jnp.exp(normalized_loss_per_example), 0) / beta
+# importance_weights = jnp.minimum((1 / N) - l * (1 - beta) * jnp.exp(normalized_loss_per_example), 0) / beta
+sorted_importance_weights = jnp.sort(importance_weights)
+sorted_importance_weights
+
+# %%
+# plot sorted importance weights
+# skip = 10000
+# sorted_normalized_loss_per_example = sorted_normalized_loss_per_example - jax.nn.logsumexp(sorted_normalized_loss_per_example)
+import matplotlib.pyplot as plt
+sorted_importance_weights = jnp.sort(importance_weights)
+# sorted_importance_weights = jnp.sort(models[2]["importance_weights"])
+plt.plot(sorted_importance_weights)
+plt.plot(jnp.ones(N) / N)
+plt.show()
+
+
+# %%
+jnp.sum(sorted_importance_weights)
+
+# %%
+train_losses
+
+# %%
+def compute_weight_variance(beta):
+    l = get_l(normalized_loss_per_example, beta)
+    importance_weights = jnp.maximum((l / N) - (1 - beta) * jnp.exp(normalized_loss_per_example), 0) / beta
+    mu = jnp.mean(importance_weights)
+    var = jnp.sum((importance_weights - mu) ** 2) / jnp.sum(importance_weights > 0)
+    return var
+
+
+betas = jnp.linspace(0, 1, 100)
+weight_variances = jax.jit(jax.vmap(compute_weight_variance))(betas)
+weight_variances
+
+# %%
+sorted_normalized_loss_per_example
+
+# %%
+betas[-1]
+# %%
+plt.plot(betas, weight_variances)
+plt.show()
 
 # %%
 jax.config.update("jax_debug_nans", True)
@@ -266,10 +443,6 @@ y_idx = 3
 sample_logp_xy, sample_logp_x, sample_logp_y = jax.jit(get_marginals)(samples[:, x_idx], samples[:, y_idx])
 sample_logp_x
 
-
-# %%
-data_logp_xy, data_logp_x, data_logp_y = jax.jit(get_marginals)(jnp.exp(train_data[:, x_idx]), jnp.exp(train_data[:, y_idx]))
-data_logp_x
 
 # %%
 from moet.utils import make_1d_obs

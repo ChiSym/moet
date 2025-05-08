@@ -95,7 +95,6 @@ def make_step(step_key):
 def sample_circuit(layers_treedef, key, Qs, W, flat_layers):
     layers = tree_unflatten(layers_treedef, flat_layers)
     W = W[None, :]
-    zs = []
     for Q, layer in zip(Qs[::-1], layers[::-1]):
         k = len(layer)
         merge_leaves, _ = tree_flatten(layer)
@@ -106,14 +105,12 @@ def sample_circuit(layers_treedef, key, Qs, W, flat_layers):
         step_key = (k, arity, mapping)
         step = make_step(step_key)
         W, z, key = step(W, key, Q)
-        zs.append(z)
 
     z = jax.nn.one_hot(
         jax.random.categorical(key, W, axis=-1),
         W.shape[-1])
 
-    zs.append(z)
-    return zs
+    return z
 
 
 @partial(jax.jit, static_argnames=("layers_treedef", "max_batch"))
