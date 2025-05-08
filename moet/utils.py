@@ -92,8 +92,8 @@ def get_l(logps, beta):
 
 def count_preprocess(x: Float[Array, "batch_size n_categories max_categories"]):
     x_exp = jnp.exp(x)
-    missing = jnp.all(x_exp == 1, axis=1)
-    return x_exp - missing[:, None]
+    missing = jnp.all(x_exp == 1, axis=-1)
+    return x_exp - missing[..., None]
 
 def categorical2d_sample(key: jax.random.PRNGKey, logits: Float[Array, "n n"]):
     logits_perturbed = logits + jax.random.gumbel(key, shape=logits.shape)
