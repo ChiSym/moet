@@ -21,7 +21,8 @@ def joint_counts(
 ) -> Float[Array, ""]:
     x_nonmissing = jnp.sum(x, axis=1)
     y_nonmissing = jnp.sum(y, axis=1)
-    n = jnp.sum(jnp.logical_and(x_nonmissing, y_nonmissing))
+    n = jnp.exp(jax.scipy.special.logsumexp(
+        jnp.log(x_nonmissing) + jnp.log(y_nonmissing), axis=0))
     sum_xy = x.T @ y
     return sum_xy, n
 
@@ -53,6 +54,8 @@ def weighted_marginals(data, weights=None, batch_size=10000):
     p_x = sum_x / n_x[:, None]
     p_xy = sum_xy / n_xy[:, :, None, None]
 
+    import ipdb; ipdb.set_trace()
+
     return p_x, p_xy
 
 def counts(x: Float[Array, "batch_size max_categories"]):
@@ -73,20 +76,19 @@ def get_l_candidates(ps_sorted, beta):
     # algorithm 2 from adagan: https://arxiv.org/pdf/1701.02386
     # sort logps in increasing order
     factor1 = beta  / cumulative_pdata
-    factor2 = (1 + (1-beta) * cumulative_pmodel / beta)
+    factor2 = (1 + (1-beta) * cumulative_pmodel /(beta * N))
 
     l_candidates = factor1 * factor2
     return l_candidates
 
 
-def get_l(logps, beta):
-    N = logps.shape[0]
-    logps_sorted = jnp.sort(logps)
-    ps_sorted = jnp.exp(logps_sorted)
-    l_candidates = get_l_candidates(ps_sorted, beta)
+def get_l(p_g, beta):
+    N = p_g.shape[0]
+    p_g_sorted = jnp.sort(p_g)
+    l_candidates = get_l_candidates(p_g_sorted, beta)
 
-    condition = l_candidates <= (1-beta) * ps_sorted * N
-    masked_candidates = jnp.where(condition, l_candidates, jnp.inf)
+    condition = l_candidates <= (1-beta) * p_g_sorted * N
+    masked_candidates = jnp.where(condition, l_candidates, 1)
     l = jnp.min(masked_candidates)
     return l
 

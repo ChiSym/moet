@@ -54,7 +54,7 @@ def dummies_to_padded_array(df: pl.DataFrame, categorical_idxs: np.ndarray):
 
 def load_huggingface(dataset_path):
     splits = {
-        "train": f"{dataset_path}/data-train-num.parquet",
+        "train": f"{dataset_path}/data-train-imputed-num.parquet",
         "test": f"{dataset_path}/data-test-full-num.parquet",
     }
     train_df = pl.read_parquet(

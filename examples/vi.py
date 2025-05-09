@@ -53,8 +53,8 @@ from moet.model import loss_fn_per_example
 
 def combined_tree_loss_per_example(logps, Qs, W, flat_layers, batch, circuit_treedef):
     logps = jax.nn.log_softmax(logps)
-    loss_per_example = jax.vmap(loss_fn_per_example, in_axes=(None, 0, 0, 0, None, None))(
-        batch, Qs, W, flat_layers, circuit_treedef, batch_size 
+    loss_per_example = jax.vmap(loss_fn_per_example, in_axes=(None, 0, 0, 0, None))(
+        batch, Qs, W, flat_layers, circuit_treedef, 
     )
     return jax.nn.logsumexp(logps[:, None] + loss_per_example, axis=0)
 
@@ -129,7 +129,7 @@ import math
 
 depth = math.ceil(math.log2(n_categories))
 # depth = 1
-n_clusters = [32 // 2**i for i in range(depth)]
+n_clusters = [256 // 2**i for i in range(depth)]
 # n_clusters = [128, 1]
 key = jax.random.PRNGKey(1234)
 key, subkey = jax.random.split(key)
@@ -141,17 +141,6 @@ trace = tree.simulate(key, (uniform_theta, genjax.Pytree.const(depth)))
 flat_layers, treedef = get_layer(trace, depth)
 layer = jax.tree_unflatten(treedef, flat_layers)
 layer
-
-# %%
-n_clusters
-
-# %%
-# depth = 2
-# layer = ((layer[0]), (i for i in range(13)))
-# flat_layers, treedef = jax.tree_util.tree_flatten(layer)
-
-# %%
-treedef
 
 # %%
 jitted_gradient_step = jax.jit(partial(gradient_step, circuit_treedef=treedef))
@@ -198,7 +187,7 @@ from moet.utils import get_all_mis, get_theta, get_l
 n_trees = 1
 n_boost_iter = 2
 N = train_data.shape[0]
-beta = .25
+beta = .05
 key = jax.random.PRNGKey(1234)
 models = []
 theta_list = []
@@ -228,10 +217,9 @@ for i in range(n_boost_iter):
         running_loss_per_example = loss_per_example
     else:
         running_loss_per_example = jax.nn.logsumexp(jnp.array([jnp.log(beta) + loss_per_example, jnp.log(1 - beta) + running_loss_per_example]), axis=0)
-    normalized_loss_per_example = -running_loss_per_example
-    normalized_loss_per_example = normalized_loss_per_example - jax.nn.logsumexp(normalized_loss_per_example)
-    l = get_l(normalized_loss_per_example, beta)
-    importance_weights = jnp.maximum(l - (1 - beta) * N * jnp.exp(normalized_loss_per_example), 0) / beta
+    p_g = jnp.exp(-running_loss_per_example)
+    l = get_l(p_g, beta)
+    importance_weights = jnp.maximum(l - (1 - beta) * N * p_g, 0) / beta
     p_x, p_xy = weighted_marginals(train_data, importance_weights)
     models.append({
         "logps": logps,
@@ -256,13 +244,111 @@ for i in range(n_boost_iter):
     print(jnp.mean(running_loss_per_example))
 
 # %%
+loss_per_example[6035]
+
+# %%
+beta = .5
+p_g = jnp.exp(-loss_per_example)
+l = get_l(p_g, beta)
+weights = jnp.maximum(l - (1-beta) * N * p_g, 0) / beta
+weights
+
+# %%
+
+
+# %%
+jnp.sum(weights)
+
+# %%
+jnp.sum(weights > 0)
+
+# %%
+
+import matplotlib.pyplot as plt
+
+# Sort and exponentiate the running loss per example
+# boosting_weights = 1/jnp.exp(jnp.sort(-running_loss_per_example))
+# boosting_weights = boosting_weights / jnp.sum(boosting_weights)
+# Plot the importance weights
+plt.figure(figsize=(10, 6))
+plt.plot(jnp.sort(weights), label='Boosting Weights')
+plt.xlabel('Index')
+plt.ylabel('Weight')
+plt.title('Boosting Weights Distribution')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+# %%
+jnp.sum(weights)
+
+# %%
+import matplotlib.pyplot as plt
+
+# Sort and exponentiate the running loss per example
+boosting_weights = jnp.sort(1/jnp.exp(-running_loss_per_example))
+boosting_weights = boosting_weights / jnp.sum(boosting_weights)
+# Plot the importance weights
+plt.figure(figsize=(10, 6))
+plt.plot(jnp.sort(boosting_weights), label='Boosting Weights')
+plt.xlabel('Index')
+plt.ylabel('Weight')
+plt.title('Boosting Weights Distribution')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+# %%
+import matplotlib.pyplot as plt
+
+# Sort and exponentiate the running loss per example
+boosting_weights = jnp.sort(1/jnp.exp(-running_loss_per_example))
+boosting_weights = boosting_weights / jnp.sum(boosting_weights)
+# Plot the importance weights
+plt.figure(figsize=(10, 6))
+plt.plot(jnp.sort(boosting_weights), label='Boosting Weights')
+plt.xlabel('Index')
+plt.ylabel('Weight')
+plt.title('Boosting Weights Distribution')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+
+
+# %%
+circuit_depth = depth
+key, subkey = jax.random.split(key)
+keys = jax.random.split(subkey, n_trees)
+traces = jax.vmap(tree.simulate, in_axes=(0, (0, None)))(
+    keys, (jnp.array([theta]), genjax.Pytree.const(circuit_depth))
+)
+
+def get_flat_layer(trace):
+    return get_layer(trace, circuit_depth)[0]
+
+flat_layers = jax.vmap(get_flat_layer)(traces)
+flat_layers
+
+# %%
 p_x
 
 # %%
-mi
+data_p_x, data_p_xy = weighted_marginals(train_data)
+data_p_x
+
 
 # %%
-theta
+p_x.sum(axis=-1)
+
+# %%
+get_all_mis(p_x, p_xy)
+
+# %%
+models[0]["mi"]
+
+# %%
+models[1]["mi"]
 
 # %%
 models[0]["train_losses"][-100:]
@@ -365,9 +451,9 @@ l
 l
 
 # %%
-importance_weights = jnp.maximum((l / N) - (1 - beta) * jnp.exp(normalized_loss_per_example), 0) / beta
+# importance_weights = jnp.maximum((l / N) - (1 - beta) * jnp.exp(normalized_loss_per_example), 0) / beta
 # importance_weights = jnp.minimum((1 / N) - l * (1 - beta) * jnp.exp(normalized_loss_per_example), 0) / beta
-sorted_importance_weights = jnp.sort(importance_weights)
+sorted_importance_weights = jnp.sort(models[0]["importance_weights"])
 sorted_importance_weights
 
 # %%
@@ -375,10 +461,14 @@ sorted_importance_weights
 # skip = 10000
 # sorted_normalized_loss_per_example = sorted_normalized_loss_per_example - jax.nn.logsumexp(sorted_normalized_loss_per_example)
 import matplotlib.pyplot as plt
-sorted_importance_weights = jnp.sort(importance_weights)
-# sorted_importance_weights = jnp.sort(models[2]["importance_weights"])
-plt.plot(sorted_importance_weights)
-plt.plot(jnp.ones(N) / N)
+
+importance_weights = models[0]["importance_weights"]
+delta = models[0]["loss_per_example"] - models[1]["loss_per_example"]
+sort_idxs = jnp.argsort(delta)
+importance_weights = importance_weights[sort_idxs]
+delta = delta[sort_idxs]
+plt.plot(delta)
+plt.plot(importance_weights)
 plt.show()
 
 

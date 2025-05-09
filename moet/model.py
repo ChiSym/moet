@@ -66,13 +66,14 @@ def circuit(
     logp = jax.nn.logsumexp(X)
 
     if normalize:
-        new_W = W - jax.nn.logsumexp(W)
+        new_W = X - jax.nn.logsumexp(X)
         return logp, new_Qs, new_W
     return logp
 
 # @functools.lru_cache(maxsize=None)
 def make_step(step_key):
-    k, arity, mapping = step_key
+    k, arity, Y_to_z_idxs = step_key
+
 
     # @jax.jit
     def step(W, key, Q):
@@ -80,13 +81,11 @@ def make_step(step_key):
         z = jax.nn.one_hot(
             jax.random.categorical(subkey, W, axis=-1),
             W.shape[-1])
-        z_merge, z_pass = jnp.split(z, [k], axis=0)
-        Y_merge = z_merge[mapping]  # could be a problem with ordering
-        Y = jnp.concatenate([Y_merge, z_pass], axis=0)
+        Y = jax.vmap(lambda idx: z[idx], in_axes=(0,))(Y_to_z_idxs)
 
         idx = jnp.argmax(Y, axis=1)
         newW = Q[jnp.arange(Y.shape[0]), idx, :]
-
+        
         return newW, z, key
 
     return step
@@ -95,32 +94,41 @@ def make_step(step_key):
 def sample_circuit(layers_treedef, key, Qs, W, flat_layers):
     layers = tree_unflatten(layers_treedef, flat_layers)
     W = W[None, :]
+    zs = []
     for Q, layer in zip(Qs[::-1], layers[::-1]):
         k = len(layer)
         merge_leaves, _ = tree_flatten(layer)
         arity = len(merge_leaves) // k
-        merge_leaves = jnp.array(merge_leaves)
-        groups = jnp.arange(merge_leaves.shape[0]) // arity
-        mapping = groups[jnp.argsort(merge_leaves)]
-        step_key = (k, arity, mapping)
+
+        passthrough_idxs = [i for i in range(len(merge_leaves)) if i not in merge_leaves]
+
+        def get_z_idx(Y_idx):
+            for i, merge in enumerate(layer):
+                if Y_idx in merge:
+                    return i
+            return len(merge_leaves) + passthrough_idxs.index(Y_idx)
+        
+        Y_to_z_idxs = jnp.array([get_z_idx(i) for i in range(
+            len(merge_leaves) + len(passthrough_idxs))])
+
+        step_key = (k, arity, Y_to_z_idxs)
         step = make_step(step_key)
         W, z, key = step(W, key, Q)
-
+        zs.append(z)
     z = jax.nn.one_hot(
         jax.random.categorical(key, W, axis=-1),
         W.shape[-1])
-
+    # zs.append(z)
     return z
 
 
-@partial(jax.jit, static_argnames=("layers_treedef", "max_batch"))
+@partial(jax.jit, static_argnames=("layers_treedef"))
 def loss_fn_per_example(
     X: Float[Array, "batch_size n_inputs input_dim"],
     Qs: PyTree[Float[Array, "?n_inputs ?output_dim ?input_dim"], "T"],
     W: Float[Array, "n_outputs"],
     layers_flat: Integer[Array, "flat_layers"],
     layers_treedef: PyTreeDef,
-    max_batch: int,
 ) -> Float[Array, "batch_size"]:
     layers = tree_unflatten(layers_treedef, layers_flat)
     pad = jnp.zeros_like(X[0:1])
